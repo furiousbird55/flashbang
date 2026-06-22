@@ -1,4 +1,4 @@
-use flashbang::devices::{discover_disks, Disk, DiskStatus};
+use flashbang::devices::{Disk, DiskChild, DiskStatus, discover_disks};
 
 fn main() {
     println!("Flashbang device discovery");
@@ -62,12 +62,49 @@ fn print_disk(disk: &Disk) {
     println!("  transport: {}", disk.transport_label());
     println!("  removable: {}", yes_no(disk.removable));
     println!("  read-only: {}", yes_no(disk.read_only));
+
+    if disk.has_mounts() {
+        println!("  mounted: yes");
+
+        for mountpoint in disk.all_mountpoints() {
+            println!("    - {mountpoint}");
+        }
+    } else {
+        println!("  mounted: no");
+    }
+
+    if !disk.children.is_empty() {
+        println!("  child devices:");
+
+        for child in &disk.children {
+            print_child(child, 4);
+        }
+    }
+}
+
+fn print_child(child: &DiskChild, indent: usize) {
+    let padding = " ".repeat(indent);
+
+    println!("{padding}- {}", child.path);
+    println!("{padding}  name: {}", child.name);
+    println!("{padding}  type: {}", child.device_type);
+    println!("{padding}  size: {:.1} GiB", child.size_gib());
+
+    if child.mountpoints.is_empty() {
+        println!("{padding}  mounted: no");
+    } else {
+        println!("{padding}  mounted: yes");
+
+        for mountpoint in &child.mountpoints {
+            println!("{padding}    - {mountpoint}");
+        }
+    }
+
+    for nested_child in &child.children {
+        print_child(nested_child, indent + 4);
+    }
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value {
-        "yes"
-    } else {
-        "no"
-    }
+    if value { "yes" } else { "no" }
 }

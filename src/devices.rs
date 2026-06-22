@@ -10,6 +10,18 @@ pub struct Disk {
     pub transport: Option<String>,
     pub removable: bool,
     pub read_only: bool,
+    pub mountpoints: Vec<String>,
+    pub children: Vec<DiskChild>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiskChild {
+    pub name: String,
+    pub path: String,
+    pub device_type: String,
+    pub size_bytes: u64,
+    pub mountpoints: Vec<String>,
+    pub children: Vec<DiskChild>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +50,40 @@ impl Disk {
     pub fn transport_label(&self) -> &str {
         self.transport.as_deref().unwrap_or("unknown transport")
     }
+
+    pub fn has_mounts(&self) -> bool {
+        !self.all_mountpoints().is_empty()
+    }
+
+    pub fn all_mountpoints(&self) -> Vec<&str> {
+        let mut mountpoints = Vec::new();
+
+        for mountpoint in &self.mountpoints {
+            mountpoints.push(mountpoint.as_str());
+        }
+
+        for child in &self.children {
+            child.collect_mountpoints(&mut mountpoints);
+        }
+
+        mountpoints
+    }
+}
+
+impl DiskChild {
+    pub fn size_gib(&self) -> f64 {
+        self.size_bytes as f64 / 1024.0 / 1024.0 / 1024.0
+    }
+
+    fn collect_mountpoints<'a>(&'a self, mountpoints: &mut Vec<&'a str>) {
+        for mountpoint in &self.mountpoints {
+            mountpoints.push(mountpoint.as_str());
+        }
+
+        for child in &self.children {
+            child.collect_mountpoints(mountpoints);
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,11 +95,13 @@ struct LsblkOutput {
 struct LsblkDevice {
     name: String,
     path: Option<String>,
-    rm: bool,
-    size: u64,
-    ro: bool,
+    rm: Option<bool>,
+    size: Option<u64>,
+    ro: Option<bool>,
     model: Option<String>,
     tran: Option<String>,
+    mountpoints: Option<Vec<Option<String>>>,
+    children: Option<Vec<LsblkDevice>>,
 
     #[serde(rename = "type")]
     device_type: String,
@@ -65,7 +113,7 @@ pub fn discover_disks() -> Result<Vec<Disk>, String> {
             "--json",
             "--bytes",
             "--output",
-            "NAME,PATH,SIZE,RM,RO,TYPE,MODEL,TRAN",
+            "NAME,PATH,SIZE,RM,RO,TYPE,MODEL,TRAN,MOUNTPOINTS",
         ])
         .output()
         .map_err(|error| format!("failed to run lsblk: {error}"))?;
@@ -81,27 +129,65 @@ pub fn discover_disks() -> Result<Vec<Disk>, String> {
         .blockdevices
         .into_iter()
         .filter(|device| device.device_type == "disk")
-        .map(|device| {
-            let name = device.name;
-            let path = device.path.unwrap_or_else(|| format!("/dev/{name}"));
-
-            Disk {
-                name,
-                path,
-                size_bytes: device.size,
-                model: clean_optional_text(device.model),
-                transport: clean_optional_text(device.tran),
-                removable: device.rm,
-                read_only: device.ro,
-            }
-        })
+        .map(convert_disk)
         .collect();
 
     Ok(disks)
+}
+
+fn convert_disk(device: LsblkDevice) -> Disk {
+    let name = device.name;
+    let path = device.path.unwrap_or_else(|| format!("/dev/{name}"));
+
+    Disk {
+        name,
+        path,
+        size_bytes: device.size.unwrap_or(0),
+        model: clean_optional_text(device.model),
+        transport: clean_optional_text(device.tran),
+        removable: device.rm.unwrap_or(false),
+        read_only: device.ro.unwrap_or(true),
+        mountpoints: clean_mountpoints(device.mountpoints),
+        children: device
+            .children
+            .unwrap_or_default()
+            .into_iter()
+            .map(convert_child)
+            .collect(),
+    }
+}
+
+fn convert_child(device: LsblkDevice) -> DiskChild {
+    let name = device.name;
+    let path = device.path.unwrap_or_else(|| format!("/dev/{name}"));
+
+    DiskChild {
+        name,
+        path,
+        device_type: device.device_type,
+        size_bytes: device.size.unwrap_or(0),
+        mountpoints: clean_mountpoints(device.mountpoints),
+        children: device
+            .children
+            .unwrap_or_default()
+            .into_iter()
+            .map(convert_child)
+            .collect(),
+    }
 }
 
 fn clean_optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
+}
+
+fn clean_mountpoints(value: Option<Vec<Option<String>>>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .collect()
 }
