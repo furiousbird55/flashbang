@@ -1,10 +1,11 @@
-// FLASHBANG_MAIN_WITH_DEVICE_WRITE_V1
+// FLASHBANG_MAIN_WITH_VERIFICATION_V1
 
 use flashbang::devices::{Disk, DiskChild, FlashDecision, discover_disks};
 use flashbang::format::format_size;
 use flashbang::images::{ImageFile, inspect_image};
 use flashbang::writer::{
-    WritePlan, build_write_plan, run_preparation_steps, write_image_to_device, write_image_to_file,
+    WritePlan, build_write_plan, run_preparation_steps, verify_image_against_device,
+    write_image_to_device, write_image_to_file,
 };
 use std::env;
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ struct ProgramArgs {
     copy_to: Option<PathBuf>,
     write_device: Option<String>,
     assume_yes: bool,
+    verify_after_write: bool,
 }
 
 fn main() {
@@ -58,7 +60,13 @@ fn main() {
 
     if let (Some(image), Some(target_path)) = (&args.image, &args.write_device) {
         println!();
-        run_device_write(image, &disks, target_path, args.assume_yes);
+        run_device_write(
+            image,
+            &disks,
+            target_path,
+            args.assume_yes,
+            args.verify_after_write,
+        );
     }
 }
 
@@ -73,6 +81,11 @@ fn print_usage() {
     println!("Device write mode:");
     println!("  sudo ./target/debug/flashbang /path/to/image.iso --write-device /dev/sdX --yes");
     println!();
+    println!("Device write with verification:");
+    println!(
+        "  sudo ./target/debug/flashbang /path/to/image.iso --write-device /dev/sdX --yes --verify"
+    );
+    println!();
 }
 
 fn read_program_args() -> Result<ProgramArgs, String> {
@@ -82,6 +95,7 @@ fn read_program_args() -> Result<ProgramArgs, String> {
     let mut copy_to: Option<PathBuf> = None;
     let mut write_device: Option<String> = None;
     let mut assume_yes = false;
+    let mut verify_after_write = false;
 
     while let Some(arg) = raw_args.next() {
         if arg == "--copy-to" {
@@ -98,6 +112,8 @@ fn read_program_args() -> Result<ProgramArgs, String> {
             write_device = Some(path.to_string_lossy().to_string());
         } else if arg == "--yes" || arg == "-y" {
             assume_yes = true;
+        } else if arg == "--verify" {
+            verify_after_write = true;
         } else if image_path.is_none() {
             image_path = Some(PathBuf::from(arg));
         } else {
@@ -110,6 +126,10 @@ fn read_program_args() -> Result<ProgramArgs, String> {
 
     if copy_to.is_some() && write_device.is_some() {
         return Err("use either --copy-to or --write-device, not both".to_string());
+    }
+
+    if verify_after_write && write_device.is_none() {
+        return Err("--verify requires --write-device".to_string());
     }
 
     let image = match image_path {
@@ -130,6 +150,7 @@ fn read_program_args() -> Result<ProgramArgs, String> {
         copy_to,
         write_device,
         assume_yes,
+        verify_after_write,
     })
 }
 
@@ -161,10 +182,20 @@ fn run_test_copy(image: &ImageFile, output_path: &PathBuf) {
     }
 }
 
-fn run_device_write(image: &ImageFile, disks: &[Disk], target_path: &str, assume_yes: bool) {
+fn run_device_write(
+    image: &ImageFile,
+    disks: &[Disk],
+    target_path: &str,
+    assume_yes: bool,
+    verify_after_write: bool,
+) {
     println!("Device write requested:");
     println!("- image: {}", image.file_name_label());
     println!("- target: {target_path}");
+    println!(
+        "- verify after write: {}",
+        if verify_after_write { "yes" } else { "no" }
+    );
 
     let Some(disk) = disks.iter().find(|disk| disk.path == target_path) else {
         eprintln!("Error: target device was not found by Flashbang: {target_path}");
@@ -252,21 +283,44 @@ fn run_device_write(image: &ImageFile, disks: &[Disk], target_path: &str, assume
             std::process::exit(1);
         }
     }
+
+    if verify_after_write {
+        run_device_verification(image, target_path);
+    }
 }
 
-fn print_progress(
-    percent: f64,
-    bytes_written: u64,
-    total_bytes: u64,
-    last_printed_percent: &mut u64,
-) {
+fn run_device_verification(image: &ImageFile, target_path: &str) {
+    println!("Verifying written image:");
+    println!("- comparing image bytes against {target_path}");
+
+    let mut last_printed_percent = 0_u64;
+
+    let result = verify_image_against_device(image, target_path, |progress| {
+        print_progress(
+            progress.percent(),
+            progress.bytes_checked,
+            progress.total_bytes,
+            &mut last_printed_percent,
+        );
+    });
+
+    match result {
+        Ok(()) => println!("Verification complete: image matches target."),
+        Err(error) => {
+            eprintln!("Verification failed: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn print_progress(percent: f64, bytes_done: u64, total_bytes: u64, last_printed_percent: &mut u64) {
     let percent = percent.floor() as u64;
 
     if percent >= *last_printed_percent + 10 || percent == 100 {
         println!(
             "  progress: {:>3}% ({}/{})",
             percent,
-            format_size(bytes_written),
+            format_size(bytes_done),
             format_size(total_bytes)
         );
 

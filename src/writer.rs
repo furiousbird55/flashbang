@@ -1,3 +1,5 @@
+// FLASHBANG_WRITER_WITH_VERIFICATION_V1
+
 use crate::devices::{Disk, FlashDecision};
 use crate::images::ImageFile;
 use std::fs::{File, OpenOptions};
@@ -48,13 +50,29 @@ pub struct WriteProgress {
     pub total_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct VerifyProgress {
+    pub bytes_checked: u64,
+    pub total_bytes: u64,
+}
+
 impl WriteProgress {
     pub fn percent(&self) -> f64 {
-        if self.total_bytes == 0 {
-            0.0
-        } else {
-            (self.bytes_written as f64 / self.total_bytes as f64) * 100.0
-        }
+        percent(self.bytes_written, self.total_bytes)
+    }
+}
+
+impl VerifyProgress {
+    pub fn percent(&self) -> f64 {
+        percent(self.bytes_checked, self.total_bytes)
+    }
+}
+
+fn percent(done: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (done as f64 / total as f64) * 100.0
     }
 }
 
@@ -145,23 +163,58 @@ pub fn run_preparation_steps(steps: &[PreparationStep]) -> Result<(), String> {
     for step in steps {
         match step {
             PreparationStep::Unmount { device_path, .. } => {
-                let output = Command::new("umount")
-                    .arg(device_path)
-                    .output()
-                    .map_err(|error| format!("failed to run umount: {error}"))?;
+                let normal_result = run_umount(device_path, false);
 
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(format!(
-                        "failed to unmount {device_path}: {}",
-                        stderr.trim()
-                    ));
+                if normal_result.is_ok() {
+                    continue;
                 }
+
+                let normal_error = normal_result.unwrap_err();
+
+                if !normal_error.contains("target is busy") {
+                    return Err(normal_error);
+                }
+
+                println!("Normal unmount failed because target is busy.");
+                println!("Trying lazy unmount for {device_path}.");
+
+                run_umount(device_path, true)?;
             }
         }
     }
 
     Ok(())
+}
+
+fn run_umount(device_path: &str, lazy: bool) -> Result<(), String> {
+    let mut command = Command::new("umount");
+
+    if lazy {
+        command.arg("--lazy");
+    }
+
+    let output = command
+        .arg(device_path)
+        .output()
+        .map_err(|error| format!("failed to run umount: {error}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if lazy {
+        Err(format!(
+            "failed to lazy-unmount {device_path}: {}",
+            stderr.trim()
+        ))
+    } else {
+        Err(format!(
+            "failed to unmount {device_path}: {}",
+            stderr.trim()
+        ))
+    }
 }
 
 pub fn write_image_to_file(
@@ -196,6 +249,68 @@ pub fn write_image_to_device(
         .map_err(|error| format!("failed to open target device: {error}"))?;
 
     stream_image_to_file_handle(image, output_file, on_progress)
+}
+
+pub fn verify_image_against_device(
+    image: &ImageFile,
+    device_path: impl AsRef<Path>,
+    mut on_progress: impl FnMut(VerifyProgress),
+) -> Result<(), String> {
+    let device_path = device_path.as_ref();
+
+    if !device_path.starts_with("/dev") {
+        return Err("target device must be under /dev".to_string());
+    }
+
+    let image_file =
+        File::open(&image.path).map_err(|error| format!("failed to open image: {error}"))?;
+
+    let device_file = File::open(device_path)
+        .map_err(|error| format!("failed to open target device: {error}"))?;
+
+    let mut image_reader = BufReader::new(image_file);
+    let mut device_reader = BufReader::new(device_file);
+
+    let mut image_buffer = vec![0_u8; COPY_BUFFER_SIZE];
+    let mut device_buffer = vec![0_u8; COPY_BUFFER_SIZE];
+
+    let mut bytes_checked = 0_u64;
+
+    while bytes_checked < image.size_bytes {
+        let remaining = image.size_bytes - bytes_checked;
+        let chunk_size = remaining.min(COPY_BUFFER_SIZE as u64) as usize;
+
+        image_reader
+            .read_exact(&mut image_buffer[..chunk_size])
+            .map_err(|error| format!("failed to read image for verification: {error}"))?;
+
+        device_reader
+            .read_exact(&mut device_buffer[..chunk_size])
+            .map_err(|error| format!("failed to read target for verification: {error}"))?;
+
+        if image_buffer[..chunk_size] != device_buffer[..chunk_size] {
+            let mismatch_index = image_buffer[..chunk_size]
+                .iter()
+                .zip(&device_buffer[..chunk_size])
+                .position(|(image_byte, device_byte)| image_byte != device_byte)
+                .unwrap_or(0);
+
+            let mismatch_offset = bytes_checked + mismatch_index as u64;
+
+            return Err(format!(
+                "verification mismatch at byte offset {mismatch_offset}"
+            ));
+        }
+
+        bytes_checked += chunk_size as u64;
+
+        on_progress(VerifyProgress {
+            bytes_checked,
+            total_bytes: image.size_bytes,
+        });
+    }
+
+    Ok(())
 }
 
 fn stream_image_to_file_handle(
