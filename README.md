@@ -10,7 +10,7 @@ It exists because flashing a USB on Linux should not require a giant Electron ap
 
 ---
 
-<img width="690" height="510" alt="Screenshot From 2026-06-23 00-15-42" src="https://github.com/user-attachments/assets/1cb43c5e-ad60-4045-9d17-ffa52afdf277" /> <img width="690" height="510" alt="Screenshot From 2026-06-23 00-22-20" src="https://github.com/user-attachments/assets/aedf2555-470d-4afc-897f-6d493506df3c" />
+<img width="690" height="510" alt="Screenshot From 2026-06-23 00-22-20" src="https://github.com/user-attachments/assets/aedf2555-470d-4afc-897f-6d493506df3c" />
 
 
 ---
