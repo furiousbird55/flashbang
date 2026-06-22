@@ -26,16 +26,21 @@ pub struct DiskChild {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiskStatus {
-    FlashCandidate,
+    ReadyToFlash,
+    NeedsUnmount,
     HiddenByDefault,
 }
 
 impl Disk {
     pub fn status(&self) -> DiskStatus {
-        if self.removable && !self.read_only {
-            DiskStatus::FlashCandidate
+        if !self.removable || self.read_only {
+            return DiskStatus::HiddenByDefault;
+        }
+
+        if self.has_mounts() {
+            DiskStatus::NeedsUnmount
         } else {
-            DiskStatus::HiddenByDefault
+            DiskStatus::ReadyToFlash
         }
     }
 

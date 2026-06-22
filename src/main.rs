@@ -21,17 +21,33 @@ fn print_disk_report(disks: &[Disk]) {
         return;
     }
 
-    println!("Flash candidates:");
+    println!("Ready to flash:");
 
-    let candidates: Vec<&Disk> = disks
+    let ready: Vec<&Disk> = disks
         .iter()
-        .filter(|disk| disk.status() == DiskStatus::FlashCandidate)
+        .filter(|disk| disk.status() == DiskStatus::ReadyToFlash)
         .collect();
 
-    if candidates.is_empty() {
+    if ready.is_empty() {
         println!("  none");
     } else {
-        for disk in candidates {
+        for disk in ready {
+            print_disk(disk);
+        }
+    }
+
+    println!();
+    println!("Needs unmount first:");
+
+    let needs_unmount: Vec<&Disk> = disks
+        .iter()
+        .filter(|disk| disk.status() == DiskStatus::NeedsUnmount)
+        .collect();
+
+    if needs_unmount.is_empty() {
+        println!("  none");
+    } else {
+        for disk in needs_unmount {
             print_disk(disk);
         }
     }
@@ -64,13 +80,13 @@ fn print_disk(disk: &Disk) {
     println!("  read-only: {}", yes_no(disk.read_only));
 
     if disk.has_mounts() {
-        println!("  mounted: yes");
+        println!("  contains mounted filesystems: yes");
 
         for mountpoint in disk.all_mountpoints() {
             println!("    - {mountpoint}");
         }
     } else {
-        println!("  mounted: no");
+        println!("  contains mounted filesystems: no");
     }
 
     if !disk.children.is_empty() {
