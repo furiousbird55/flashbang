@@ -147,7 +147,6 @@ Short-term:
 - Better success/failure messages
 - Confirmation dialog before flashing
 - Cleaner release script
-- Screenshots in README
 - Improved AppImage polish
 - Better device details in the GUI
 
