@@ -169,6 +169,7 @@ fn print_write_plan(plan: &WritePlan) {
     println!("    target model: {}", plan.target_model);
     println!("    target size: {}", format_size(plan.target_size_bytes));
     println!("    readiness: {}", plan.decision.label());
+    println!("    execution: {}", plan.execution_mode.label());
 
     if plan.preparation_steps.is_empty() {
         println!("    preparation: none");
@@ -180,10 +181,14 @@ fn print_write_plan(plan: &WritePlan) {
         }
     }
 
-    println!("    final actions:");
+    if plan.final_actions.is_empty() {
+        println!("    final actions: none");
+    } else {
+        println!("    final actions:");
 
-    for action in &plan.final_actions {
-        println!("      - {}", action.label());
+        for action in &plan.final_actions {
+            println!("      - {}", action.label());
+        }
     }
 }
 

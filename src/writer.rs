@@ -11,8 +11,16 @@ pub struct WritePlan {
     pub target_model: String,
     pub target_size_bytes: u64,
     pub decision: FlashDecision,
+    pub execution_mode: ExecutionMode,
     pub preparation_steps: Vec<PreparationStep>,
     pub final_actions: Vec<FinalAction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    Immediate,
+    AfterPreparation,
+    Blocked,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +35,23 @@ pub enum PreparationStep {
 pub enum FinalAction {
     WriteImageBytes,
     SyncTarget,
+}
+
+impl ExecutionMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ExecutionMode::Immediate => "can execute immediately",
+            ExecutionMode::AfterPreparation => "can execute after preparation",
+            ExecutionMode::Blocked => "blocked",
+        }
+    }
+
+    pub fn can_eventually_write(&self) -> bool {
+        matches!(
+            self,
+            ExecutionMode::Immediate | ExecutionMode::AfterPreparation
+        )
+    }
 }
 
 impl PreparationStep {
@@ -54,14 +79,32 @@ impl FinalAction {
 pub fn build_write_plan(image: &ImageFile, disk: &Disk) -> WritePlan {
     let decision = disk.flash_decision(Some(image.size_bytes));
 
-    let preparation_steps = disk
-        .mounted_filesystems()
-        .into_iter()
-        .map(|filesystem| PreparationStep::Unmount {
-            device_path: filesystem.device_path,
-            mountpoint: filesystem.mountpoint,
-        })
-        .collect();
+    let execution_mode = match decision {
+        FlashDecision::ReadyToFlash => ExecutionMode::Immediate,
+        FlashDecision::NeedsUnmount => ExecutionMode::AfterPreparation,
+        FlashDecision::NoImageSelected
+        | FlashDecision::ImageTooLarge
+        | FlashDecision::ReadOnly
+        | FlashDecision::HiddenByDefault => ExecutionMode::Blocked,
+    };
+
+    let preparation_steps = if execution_mode == ExecutionMode::AfterPreparation {
+        disk.mounted_filesystems()
+            .into_iter()
+            .map(|filesystem| PreparationStep::Unmount {
+                device_path: filesystem.device_path,
+                mountpoint: filesystem.mountpoint,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let final_actions = if execution_mode.can_eventually_write() {
+        vec![FinalAction::WriteImageBytes, FinalAction::SyncTarget]
+    } else {
+        Vec::new()
+    };
 
     WritePlan {
         image_path: image.path.clone(),
@@ -71,7 +114,8 @@ pub fn build_write_plan(image: &ImageFile, disk: &Disk) -> WritePlan {
         target_model: disk.model_label().to_string(),
         target_size_bytes: disk.size_bytes,
         decision,
+        execution_mode,
         preparation_steps,
-        final_actions: vec![FinalAction::WriteImageBytes, FinalAction::SyncTarget],
+        final_actions,
     }
 }
