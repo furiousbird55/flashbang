@@ -1,7 +1,11 @@
+// FLASHBANG_MAIN_WITH_DEVICE_WRITE_V1
+
 use flashbang::devices::{Disk, DiskChild, FlashDecision, discover_disks};
 use flashbang::format::format_size;
 use flashbang::images::{ImageFile, inspect_image};
-use flashbang::writer::{WritePlan, build_write_plan, write_image_to_file};
+use flashbang::writer::{
+    WritePlan, build_write_plan, run_preparation_steps, write_image_to_device, write_image_to_file,
+};
 use std::env;
 use std::path::PathBuf;
 
@@ -14,6 +18,8 @@ enum ReportSection {
 struct ProgramArgs {
     image: Option<ImageFile>,
     copy_to: Option<PathBuf>,
+    write_device: Option<String>,
+    assume_yes: bool,
 }
 
 fn main() {
@@ -37,13 +43,7 @@ fn main() {
             println!();
         }
     } else {
-        println!("No image selected.");
-        println!("Tip: run with an image path, for example:");
-        println!("  cargo run -- /path/to/image.iso");
-        println!();
-        println!("Test copy mode:");
-        println!("  cargo run -- /path/to/image.iso --copy-to /tmp/flashbang-test.img");
-        println!();
+        print_usage();
     }
 
     let disks = match discover_disks() {
@@ -55,6 +55,24 @@ fn main() {
     };
 
     print_disk_report(&disks, args.image.as_ref());
+
+    if let (Some(image), Some(target_path)) = (&args.image, &args.write_device) {
+        println!();
+        run_device_write(image, &disks, target_path, args.assume_yes);
+    }
+}
+
+fn print_usage() {
+    println!("No image selected.");
+    println!("Tip:");
+    println!("  cargo run -- /path/to/image.iso");
+    println!();
+    println!("Test copy mode:");
+    println!("  cargo run -- /path/to/image.iso --copy-to /tmp/flashbang-test.img");
+    println!();
+    println!("Device write mode:");
+    println!("  sudo ./target/debug/flashbang /path/to/image.iso --write-device /dev/sdX --yes");
+    println!();
 }
 
 fn read_program_args() -> Result<ProgramArgs, String> {
@@ -62,6 +80,8 @@ fn read_program_args() -> Result<ProgramArgs, String> {
 
     let mut image_path: Option<PathBuf> = None;
     let mut copy_to: Option<PathBuf> = None;
+    let mut write_device: Option<String> = None;
+    let mut assume_yes = false;
 
     while let Some(arg) = raw_args.next() {
         if arg == "--copy-to" {
@@ -70,6 +90,14 @@ fn read_program_args() -> Result<ProgramArgs, String> {
             };
 
             copy_to = Some(PathBuf::from(path));
+        } else if arg == "--write-device" {
+            let Some(path) = raw_args.next() else {
+                return Err("--write-device needs a target device path".to_string());
+            };
+
+            write_device = Some(path.to_string_lossy().to_string());
+        } else if arg == "--yes" || arg == "-y" {
+            assume_yes = true;
         } else if image_path.is_none() {
             image_path = Some(PathBuf::from(arg));
         } else {
@@ -78,6 +106,10 @@ fn read_program_args() -> Result<ProgramArgs, String> {
                 PathBuf::from(arg).display()
             ));
         }
+    }
+
+    if copy_to.is_some() && write_device.is_some() {
+        return Err("use either --copy-to or --write-device, not both".to_string());
     }
 
     let image = match image_path {
@@ -89,7 +121,16 @@ fn read_program_args() -> Result<ProgramArgs, String> {
         return Err("--copy-to requires an image path".to_string());
     }
 
-    Ok(ProgramArgs { image, copy_to })
+    if write_device.is_some() && image.is_none() {
+        return Err("--write-device requires an image path".to_string());
+    }
+
+    Ok(ProgramArgs {
+        image,
+        copy_to,
+        write_device,
+        assume_yes,
+    })
 }
 
 fn run_test_copy(image: &ImageFile, output_path: &PathBuf) {
@@ -103,18 +144,12 @@ fn run_test_copy(image: &ImageFile, output_path: &PathBuf) {
     let mut last_printed_percent = 0_u64;
 
     let result = write_image_to_file(image, output_path, |progress| {
-        let percent = progress.percent().floor() as u64;
-
-        if percent >= last_printed_percent + 10 || percent == 100 {
-            println!(
-                "  progress: {:>3}% ({}/{})",
-                percent,
-                format_size(progress.bytes_written),
-                format_size(progress.total_bytes)
-            );
-
-            last_printed_percent = percent;
-        }
+        print_progress(
+            progress.percent(),
+            progress.bytes_written,
+            progress.total_bytes,
+            &mut last_printed_percent,
+        );
     });
 
     match result {
@@ -123,6 +158,119 @@ fn run_test_copy(image: &ImageFile, output_path: &PathBuf) {
             eprintln!("  result: test copy failed: {error}");
             std::process::exit(1);
         }
+    }
+}
+
+fn run_device_write(image: &ImageFile, disks: &[Disk], target_path: &str, assume_yes: bool) {
+    println!("Device write requested:");
+    println!("- image: {}", image.file_name_label());
+    println!("- target: {target_path}");
+
+    let Some(disk) = disks.iter().find(|disk| disk.path == target_path) else {
+        eprintln!("Error: target device was not found by Flashbang: {target_path}");
+        std::process::exit(1);
+    };
+
+    let plan = build_write_plan(image, disk);
+
+    println!("- target model: {}", plan.target_model);
+    println!("- target size: {}", format_size(plan.target_size_bytes));
+    println!("- readiness: {}", plan.decision.label());
+    println!("- execution: {}", plan.execution_mode.label());
+
+    if !plan.execution_mode.can_eventually_write() {
+        eprintln!("Error: this target is not writable in its current state.");
+        std::process::exit(1);
+    }
+
+    if !assume_yes {
+        eprintln!("Error: refusing to write without --yes.");
+        eprintln!("Re-run with:");
+        eprintln!(
+            "  sudo ./target/debug/flashbang {} --write-device {target_path} --yes",
+            image.path.display()
+        );
+        std::process::exit(1);
+    }
+
+    if !plan.preparation_steps.is_empty() {
+        println!("Preparing target:");
+
+        for step in &plan.preparation_steps {
+            println!("- {}", step.label());
+        }
+
+        if let Err(error) = run_preparation_steps(&plan.preparation_steps) {
+            eprintln!("Error during preparation: {error}");
+            std::process::exit(1);
+        }
+
+        println!("Preparation complete.");
+    }
+
+    let refreshed_disks = match discover_disks() {
+        Ok(disks) => disks,
+        Err(error) => {
+            eprintln!("Disk rediscovery error after preparation: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    let Some(refreshed_disk) = refreshed_disks.iter().find(|disk| disk.path == target_path) else {
+        eprintln!("Error: target disappeared after preparation: {target_path}");
+        std::process::exit(1);
+    };
+
+    let refreshed_decision = refreshed_disk.flash_decision(Some(image.size_bytes));
+
+    if refreshed_decision != FlashDecision::ReadyToFlash {
+        eprintln!(
+            "Error: target is still not ready after preparation: {}",
+            refreshed_decision.label()
+        );
+        std::process::exit(1);
+    }
+
+    println!("Writing image to device:");
+    println!("- this will overwrite {target_path}");
+
+    let mut last_printed_percent = 0_u64;
+
+    let result = write_image_to_device(image, target_path, |progress| {
+        print_progress(
+            progress.percent(),
+            progress.bytes_written,
+            progress.total_bytes,
+            &mut last_printed_percent,
+        );
+    });
+
+    match result {
+        Ok(()) => println!("Device write complete."),
+        Err(error) => {
+            eprintln!("Device write failed: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn print_progress(
+    percent: f64,
+    bytes_written: u64,
+    total_bytes: u64,
+    last_printed_percent: &mut u64,
+) {
+    let percent = percent.floor() as u64;
+
+    if percent >= *last_printed_percent + 10 || percent == 100 {
+        println!(
+            "  progress: {:>3}% ({}/{})",
+            percent,
+            format_size(bytes_written),
+            format_size(total_bytes)
+        );
+
+        *last_printed_percent = percent;
     }
 }
 

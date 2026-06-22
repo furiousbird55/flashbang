@@ -3,6 +3,7 @@ use crate::images::ImageFile;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const COPY_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
@@ -140,20 +141,70 @@ pub fn build_write_plan(image: &ImageFile, disk: &Disk) -> WritePlan {
     }
 }
 
+pub fn run_preparation_steps(steps: &[PreparationStep]) -> Result<(), String> {
+    for step in steps {
+        match step {
+            PreparationStep::Unmount { device_path, .. } => {
+                let output = Command::new("umount")
+                    .arg(device_path)
+                    .output()
+                    .map_err(|error| format!("failed to run umount: {error}"))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!(
+                        "failed to unmount {device_path}: {}",
+                        stderr.trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn write_image_to_file(
     image: &ImageFile,
     output_path: impl AsRef<Path>,
-    mut on_progress: impl FnMut(WriteProgress),
+    on_progress: impl FnMut(WriteProgress),
 ) -> Result<(), String> {
-    let input_file =
-        File::open(&image.path).map_err(|error| format!("failed to open image: {error}"))?;
-
     let output_file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(output_path.as_ref())
         .map_err(|error| format!("failed to open output file: {error}"))?;
+
+    stream_image_to_file_handle(image, output_file, on_progress)
+}
+
+pub fn write_image_to_device(
+    image: &ImageFile,
+    device_path: impl AsRef<Path>,
+    on_progress: impl FnMut(WriteProgress),
+) -> Result<(), String> {
+    let device_path = device_path.as_ref();
+
+    if !device_path.starts_with("/dev") {
+        return Err("target device must be under /dev".to_string());
+    }
+
+    let output_file = OpenOptions::new()
+        .write(true)
+        .open(device_path)
+        .map_err(|error| format!("failed to open target device: {error}"))?;
+
+    stream_image_to_file_handle(image, output_file, on_progress)
+}
+
+fn stream_image_to_file_handle(
+    image: &ImageFile,
+    output_file: File,
+    mut on_progress: impl FnMut(WriteProgress),
+) -> Result<(), String> {
+    let input_file =
+        File::open(&image.path).map_err(|error| format!("failed to open image: {error}"))?;
 
     let mut reader = BufReader::new(input_file);
     let mut writer = BufWriter::new(output_file);
@@ -171,7 +222,7 @@ pub fn write_image_to_file(
 
         writer
             .write_all(&buffer[..bytes_read])
-            .map_err(|error| format!("failed to write output file: {error}"))?;
+            .map_err(|error| format!("failed to write target: {error}"))?;
 
         bytes_written += bytes_read as u64;
 
@@ -183,12 +234,12 @@ pub fn write_image_to_file(
 
     writer
         .flush()
-        .map_err(|error| format!("failed to flush output file: {error}"))?;
+        .map_err(|error| format!("failed to flush target: {error}"))?;
 
     writer
         .get_ref()
         .sync_all()
-        .map_err(|error| format!("failed to sync output file: {error}"))?;
+        .map_err(|error| format!("failed to sync target: {error}"))?;
 
     Ok(())
 }
