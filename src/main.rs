@@ -1,7 +1,7 @@
 use flashbang::devices::{Disk, DiskChild, FlashDecision, discover_disks};
 use flashbang::format::format_size;
 use flashbang::images::{ImageFile, inspect_image};
-use flashbang::writer::{WritePlan, build_write_plan};
+use flashbang::writer::{WritePlan, build_write_plan, write_image_to_file};
 use std::env;
 use std::path::PathBuf;
 
@@ -11,25 +11,38 @@ enum ReportSection {
     Hidden,
 }
 
+struct ProgramArgs {
+    image: Option<ImageFile>,
+    copy_to: Option<PathBuf>,
+}
+
 fn main() {
     println!("Flashbang device discovery");
     println!();
 
-    let image = match read_image_argument() {
-        Ok(image) => image,
+    let args = match read_program_args() {
+        Ok(args) => args,
         Err(error) => {
-            eprintln!("Image error: {error}");
+            eprintln!("Argument error: {error}");
             std::process::exit(1);
         }
     };
 
-    if let Some(image) = &image {
+    if let Some(image) = &args.image {
         print_image_report(image);
         println!();
+
+        if let Some(output_path) = &args.copy_to {
+            run_test_copy(image, output_path);
+            println!();
+        }
     } else {
         println!("No image selected.");
         println!("Tip: run with an image path, for example:");
         println!("  cargo run -- /path/to/image.iso");
+        println!();
+        println!("Test copy mode:");
+        println!("  cargo run -- /path/to/image.iso --copy-to /tmp/flashbang-test.img");
         println!();
     }
 
@@ -41,16 +54,76 @@ fn main() {
         }
     };
 
-    print_disk_report(&disks, image.as_ref());
+    print_disk_report(&disks, args.image.as_ref());
 }
 
-fn read_image_argument() -> Result<Option<ImageFile>, String> {
-    let Some(path) = env::args_os().nth(1) else {
-        return Ok(None);
+fn read_program_args() -> Result<ProgramArgs, String> {
+    let mut raw_args = env::args_os().skip(1);
+
+    let mut image_path: Option<PathBuf> = None;
+    let mut copy_to: Option<PathBuf> = None;
+
+    while let Some(arg) = raw_args.next() {
+        if arg == "--copy-to" {
+            let Some(path) = raw_args.next() else {
+                return Err("--copy-to needs an output path".to_string());
+            };
+
+            copy_to = Some(PathBuf::from(path));
+        } else if image_path.is_none() {
+            image_path = Some(PathBuf::from(arg));
+        } else {
+            return Err(format!(
+                "unexpected argument: {}",
+                PathBuf::from(arg).display()
+            ));
+        }
+    }
+
+    let image = match image_path {
+        Some(path) => Some(inspect_image(path)?),
+        None => None,
     };
 
-    let path = PathBuf::from(path);
-    inspect_image(path).map(Some)
+    if copy_to.is_some() && image.is_none() {
+        return Err("--copy-to requires an image path".to_string());
+    }
+
+    Ok(ProgramArgs { image, copy_to })
+}
+
+fn run_test_copy(image: &ImageFile, output_path: &PathBuf) {
+    println!("Test copy:");
+    println!(
+        "- writing {} to {}",
+        image.file_name_label(),
+        output_path.display()
+    );
+
+    let mut last_printed_percent = 0_u64;
+
+    let result = write_image_to_file(image, output_path, |progress| {
+        let percent = progress.percent().floor() as u64;
+
+        if percent >= last_printed_percent + 10 || percent == 100 {
+            println!(
+                "  progress: {:>3}% ({}/{})",
+                percent,
+                format_size(progress.bytes_written),
+                format_size(progress.total_bytes)
+            );
+
+            last_printed_percent = percent;
+        }
+    });
+
+    match result {
+        Ok(()) => println!("  result: test copy complete"),
+        Err(error) => {
+            eprintln!("  result: test copy failed: {error}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn print_image_report(image: &ImageFile) {

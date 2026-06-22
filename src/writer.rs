@@ -1,6 +1,10 @@
 use crate::devices::{Disk, FlashDecision};
 use crate::images::ImageFile;
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+
+const COPY_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct WritePlan {
@@ -35,6 +39,22 @@ pub enum PreparationStep {
 pub enum FinalAction {
     WriteImageBytes,
     SyncTarget,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WriteProgress {
+    pub bytes_written: u64,
+    pub total_bytes: u64,
+}
+
+impl WriteProgress {
+    pub fn percent(&self) -> f64 {
+        if self.total_bytes == 0 {
+            0.0
+        } else {
+            (self.bytes_written as f64 / self.total_bytes as f64) * 100.0
+        }
+    }
 }
 
 impl ExecutionMode {
@@ -118,4 +138,57 @@ pub fn build_write_plan(image: &ImageFile, disk: &Disk) -> WritePlan {
         preparation_steps,
         final_actions,
     }
+}
+
+pub fn write_image_to_file(
+    image: &ImageFile,
+    output_path: impl AsRef<Path>,
+    mut on_progress: impl FnMut(WriteProgress),
+) -> Result<(), String> {
+    let input_file =
+        File::open(&image.path).map_err(|error| format!("failed to open image: {error}"))?;
+
+    let output_file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(output_path.as_ref())
+        .map_err(|error| format!("failed to open output file: {error}"))?;
+
+    let mut reader = BufReader::new(input_file);
+    let mut writer = BufWriter::new(output_file);
+    let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
+    let mut bytes_written = 0_u64;
+
+    loop {
+        let bytes_read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("failed to read image: {error}"))?;
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        writer
+            .write_all(&buffer[..bytes_read])
+            .map_err(|error| format!("failed to write output file: {error}"))?;
+
+        bytes_written += bytes_read as u64;
+
+        on_progress(WriteProgress {
+            bytes_written,
+            total_bytes: image.size_bytes,
+        });
+    }
+
+    writer
+        .flush()
+        .map_err(|error| format!("failed to flush output file: {error}"))?;
+
+    writer
+        .get_ref()
+        .sync_all()
+        .map_err(|error| format!("failed to sync output file: {error}"))?;
+
+    Ok(())
 }
