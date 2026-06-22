@@ -1,12 +1,10 @@
-// FLASHBANG_MAIN_WITH_VERIFICATION_V1
+// FLASHBANG_MAIN_USING_FLASH_WORKFLOW_V1
 
 use flashbang::devices::{Disk, DiskChild, FlashDecision, discover_disks};
+use flashbang::flash::{FlashEvent, FlashRequest, flash_image_to_device};
 use flashbang::format::format_size;
 use flashbang::images::{ImageFile, inspect_image};
-use flashbang::writer::{
-    WritePlan, build_write_plan, run_preparation_steps, verify_image_against_device,
-    write_image_to_device, write_image_to_file,
-};
+use flashbang::writer::{WritePlan, build_write_plan, write_image_to_file};
 use std::env;
 use std::path::PathBuf;
 
@@ -60,13 +58,7 @@ fn main() {
 
     if let (Some(image), Some(target_path)) = (&args.image, &args.write_device) {
         println!();
-        run_device_write(
-            image,
-            &disks,
-            target_path,
-            args.assume_yes,
-            args.verify_after_write,
-        );
+        run_device_write(image, target_path, args.assume_yes, args.verify_after_write);
     }
 }
 
@@ -184,7 +176,6 @@ fn run_test_copy(image: &ImageFile, output_path: &PathBuf) {
 
 fn run_device_write(
     image: &ImageFile,
-    disks: &[Disk],
     target_path: &str,
     assume_yes: bool,
     verify_after_write: bool,
@@ -197,23 +188,6 @@ fn run_device_write(
         if verify_after_write { "yes" } else { "no" }
     );
 
-    let Some(disk) = disks.iter().find(|disk| disk.path == target_path) else {
-        eprintln!("Error: target device was not found by Flashbang: {target_path}");
-        std::process::exit(1);
-    };
-
-    let plan = build_write_plan(image, disk);
-
-    println!("- target model: {}", plan.target_model);
-    println!("- target size: {}", format_size(plan.target_size_bytes));
-    println!("- readiness: {}", plan.decision.label());
-    println!("- execution: {}", plan.execution_mode.label());
-
-    if !plan.execution_mode.can_eventually_write() {
-        eprintln!("Error: this target is not writable in its current state.");
-        std::process::exit(1);
-    }
-
     if !assume_yes {
         eprintln!("Error: refusing to write without --yes.");
         eprintln!("Re-run with:");
@@ -224,92 +198,89 @@ fn run_device_write(
         std::process::exit(1);
     }
 
-    if !plan.preparation_steps.is_empty() {
-        println!("Preparing target:");
-
-        for step in &plan.preparation_steps {
-            println!("- {}", step.label());
-        }
-
-        if let Err(error) = run_preparation_steps(&plan.preparation_steps) {
-            eprintln!("Error during preparation: {error}");
-            std::process::exit(1);
-        }
-
-        println!("Preparation complete.");
-    }
-
-    let refreshed_disks = match discover_disks() {
-        Ok(disks) => disks,
-        Err(error) => {
-            eprintln!("Disk rediscovery error after preparation: {error}");
-            std::process::exit(1);
-        }
+    let request = FlashRequest {
+        image: image.clone(),
+        target_path: target_path.to_string(),
+        verify_after_write,
     };
 
-    let Some(refreshed_disk) = refreshed_disks.iter().find(|disk| disk.path == target_path) else {
-        eprintln!("Error: target disappeared after preparation: {target_path}");
-        std::process::exit(1);
-    };
+    let mut last_write_percent = 0_u64;
+    let mut last_verify_percent = 0_u64;
+    let mut printed_writing_header = false;
+    let mut printed_verifying_header = false;
 
-    let refreshed_decision = refreshed_disk.flash_decision(Some(image.size_bytes));
+    let result = flash_image_to_device(request, |event| match event {
+        FlashEvent::PlanBuilt {
+            target_path,
+            target_model,
+            target_size_bytes,
+            decision,
+            execution_mode,
+            verify_after_write,
+        } => {
+            println!("- confirmed target: {target_path}");
+            println!("- target model: {target_model}");
+            println!("- target size: {}", format_size(target_size_bytes));
+            println!("- readiness: {}", decision.label());
+            println!("- execution: {}", execution_mode.label());
+            println!(
+                "- verification: {}",
+                if verify_after_write {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+        }
+        FlashEvent::Preparing { step_label } => {
+            println!("Preparing target:");
+            println!("- {step_label}");
+        }
+        FlashEvent::PreparationFinished => {
+            println!("Preparation complete.");
+        }
+        FlashEvent::Writing { progress } => {
+            if !printed_writing_header {
+                println!("Writing image to device:");
+                println!("- this will overwrite {target_path}");
+                printed_writing_header = true;
+            }
 
-    if refreshed_decision != FlashDecision::ReadyToFlash {
-        eprintln!(
-            "Error: target is still not ready after preparation: {}",
-            refreshed_decision.label()
-        );
-        std::process::exit(1);
-    }
+            print_progress(
+                progress.percent(),
+                progress.bytes_written,
+                progress.total_bytes,
+                &mut last_write_percent,
+            );
+        }
+        FlashEvent::WriteFinished => {
+            println!("Device write complete.");
+        }
+        FlashEvent::Verifying { progress } => {
+            if !printed_verifying_header {
+                println!("Verifying written image:");
+                println!("- comparing image bytes against {target_path}");
+                printed_verifying_header = true;
+            }
 
-    println!("Writing image to device:");
-    println!("- this will overwrite {target_path}");
-
-    let mut last_printed_percent = 0_u64;
-
-    let result = write_image_to_device(image, target_path, |progress| {
-        print_progress(
-            progress.percent(),
-            progress.bytes_written,
-            progress.total_bytes,
-            &mut last_printed_percent,
-        );
+            print_progress(
+                progress.percent(),
+                progress.bytes_checked,
+                progress.total_bytes,
+                &mut last_verify_percent,
+            );
+        }
+        FlashEvent::VerifyFinished => {
+            println!("Verification complete: image matches target.");
+        }
+        FlashEvent::Finished => {
+            println!("Flash operation finished.");
+        }
     });
 
-    match result {
-        Ok(()) => println!("Device write complete."),
-        Err(error) => {
-            eprintln!("Device write failed: {error}");
-            std::process::exit(1);
-        }
-    }
-
-    if verify_after_write {
-        run_device_verification(image, target_path);
-    }
-}
-
-fn run_device_verification(image: &ImageFile, target_path: &str) {
-    println!("Verifying written image:");
-    println!("- comparing image bytes against {target_path}");
-
-    let mut last_printed_percent = 0_u64;
-
-    let result = verify_image_against_device(image, target_path, |progress| {
-        print_progress(
-            progress.percent(),
-            progress.bytes_checked,
-            progress.total_bytes,
-            &mut last_printed_percent,
-        );
-    });
-
-    match result {
-        Ok(()) => println!("Verification complete: image matches target."),
-        Err(error) => {
-            eprintln!("Verification failed: {error}");
-            std::process::exit(1);
-        }
+    if let Err(error) = result {
+        eprintln!("Flash operation failed: {error}");
+        std::process::exit(1);
     }
 }
 
