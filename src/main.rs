@@ -1,21 +1,58 @@
 use flashbang::devices::{Disk, DiskChild, DiskStatus, discover_disks};
+use flashbang::images::{ImageFile, inspect_image};
+use std::env;
+use std::path::PathBuf;
 
 fn main() {
     println!("Flashbang device discovery");
     println!();
 
-    let disks = match discover_disks() {
-        Ok(disks) => disks,
+    let image = match read_image_argument() {
+        Ok(image) => image,
         Err(error) => {
-            eprintln!("Error: {error}");
+            eprintln!("Image error: {error}");
             std::process::exit(1);
         }
     };
 
-    print_disk_report(&disks);
+    if let Some(image) = &image {
+        print_image_report(image);
+        println!();
+    } else {
+        println!("No image selected.");
+        println!("Tip: run with an image path, for example:");
+        println!("  cargo run -- /path/to/image.iso");
+        println!();
+    }
+
+    let disks = match discover_disks() {
+        Ok(disks) => disks,
+        Err(error) => {
+            eprintln!("Disk discovery error: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    print_disk_report(&disks, image.as_ref());
 }
 
-fn print_disk_report(disks: &[Disk]) {
+fn read_image_argument() -> Result<Option<ImageFile>, String> {
+    let Some(path) = env::args_os().nth(1) else {
+        return Ok(None);
+    };
+
+    let path = PathBuf::from(path);
+    inspect_image(path).map(Some)
+}
+
+fn print_image_report(image: &ImageFile) {
+    println!("Selected image:");
+    println!("- {}", image.file_name_label());
+    println!("  path: {}", image.path.display());
+    println!("  size: {}", format_size(image.size_bytes));
+}
+
+fn print_disk_report(disks: &[Disk], image: Option<&ImageFile>) {
     if disks.is_empty() {
         println!("No disks found.");
         return;
@@ -32,7 +69,7 @@ fn print_disk_report(disks: &[Disk]) {
         println!("  none");
     } else {
         for disk in ready {
-            print_disk(disk);
+            print_disk(disk, image);
         }
     }
 
@@ -48,7 +85,7 @@ fn print_disk_report(disks: &[Disk]) {
         println!("  none");
     } else {
         for disk in needs_unmount {
-            print_disk(disk);
+            print_disk(disk, image);
         }
     }
 
@@ -64,20 +101,27 @@ fn print_disk_report(disks: &[Disk]) {
         println!("  none");
     } else {
         for disk in hidden {
-            print_disk(disk);
+            print_disk(disk, image);
         }
     }
 }
 
-fn print_disk(disk: &Disk) {
+fn print_disk(disk: &Disk, image: Option<&ImageFile>) {
     println!();
     println!("- {}", disk.path);
     println!("  name: {}", disk.name);
     println!("  model: {}", disk.model_label());
-    println!("  size: {:.1} GiB", disk.size_gib());
+    println!("  size: {}", format_size(disk.size_bytes));
     println!("  transport: {}", disk.transport_label());
     println!("  removable: {}", yes_no(disk.removable));
     println!("  read-only: {}", yes_no(disk.read_only));
+
+    if let Some(image) = image {
+        println!(
+            "  image fits: {}",
+            yes_no(image.fits_in_bytes(disk.size_bytes))
+        );
+    }
 
     if disk.has_mounts() {
         println!("  contains mounted filesystems: yes");
@@ -104,7 +148,7 @@ fn print_child(child: &DiskChild, indent: usize) {
     println!("{padding}- {}", child.path);
     println!("{padding}  name: {}", child.name);
     println!("{padding}  type: {}", child.device_type);
-    println!("{padding}  size: {:.1} GiB", child.size_gib());
+    println!("{padding}  size: {}", format_size(child.size_bytes));
 
     if child.mountpoints.is_empty() {
         println!("{padding}  mounted: no");
@@ -123,4 +167,15 @@ fn print_child(child: &DiskChild, indent: usize) {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+fn format_size(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+    if bytes as f64 >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    }
 }
