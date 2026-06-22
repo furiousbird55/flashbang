@@ -10,6 +10,11 @@ It exists because flashing a USB on Linux should not require a giant Electron ap
 
 ---
 
+<img width="690" height="510" alt="Screenshot From 2026-06-23 00-15-42" src="https://github.com/user-attachments/assets/1cb43c5e-ad60-4045-9d17-ffa52afdf277" />
+
+
+---
+
 ## Download
 
 Download the latest beta AppImage from the Releases page:
@@ -68,12 +73,6 @@ Flashbang writes directly to block devices.
 That means the selected USB drive will be overwritten. This is the point of the app, but it also means you should double-check the selected target before flashing.
 
 Flashbang hides non-removable/internal drives by default, but beta software is still beta software.
-
----
-
-## Screenshots
-
-Screenshots coming soon.
 
 ---
 
