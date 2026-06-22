@@ -7,14 +7,15 @@ use flashbang::images::inspect_image;
 use gtk::glib::{self, ControlFlow};
 use gtk::{Align, Orientation};
 use std::cell::RefCell;
-use std::env;
 use std::io::{BufRead, BufReader};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+use std::{env, fs};
 
 const APP_ID: &str = "io.github.furiousbird55.Flashbang";
 
@@ -375,7 +376,7 @@ fn run_privileged_flash_command(
     verify_after_write: bool,
     mut send_message: impl FnMut(GuiFlashMessage),
 ) -> Result<(), String> {
-    let cli_path = sibling_cli_binary_path()?;
+    let cli_path = prepare_privileged_cli_helper()?;
 
     send_message(GuiFlashMessage::Status(
         "Authentication requested".to_string(),
@@ -474,20 +475,43 @@ fn run_privileged_flash_command(
     }
 }
 
-fn sibling_cli_binary_path() -> Result<PathBuf, String> {
-    let mut path =
+fn prepare_privileged_cli_helper() -> Result<PathBuf, String> {
+    let mut bundled_path =
         env::current_exe().map_err(|error| format!("failed to locate GUI executable: {error}"))?;
 
-    path.set_file_name("flashbang");
+    bundled_path.set_file_name("flashbang");
 
-    if !path.exists() {
+    if !bundled_path.exists() {
         return Err(format!(
             "CLI helper was not found at {}. Run: cargo build --bin flashbang --bin flashbang-gui",
-            path.display()
+            bundled_path.display()
         ));
     }
 
-    Ok(path)
+    let helper_dir = env::temp_dir().join(format!("flashbang-helper-{}", std::process::id()));
+    fs::create_dir_all(&helper_dir)
+        .map_err(|error| format!("failed to create helper directory: {error}"))?;
+
+    let helper_path = helper_dir.join("flashbang");
+
+    fs::copy(&bundled_path, &helper_path).map_err(|error| {
+        format!(
+            "failed to copy CLI helper from {} to {}: {error}",
+            bundled_path.display(),
+            helper_path.display()
+        )
+    })?;
+
+    let mut permissions = fs::metadata(&helper_path)
+        .map_err(|error| format!("failed to read helper permissions: {error}"))?
+        .permissions();
+
+    permissions.set_mode(0o755);
+
+    fs::set_permissions(&helper_path, permissions)
+        .map_err(|error| format!("failed to make helper executable: {error}"))?;
+
+    Ok(helper_path)
 }
 
 fn parse_progress_percent(line: &str) -> Option<f64> {

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Flashbang
+Comment=USB image flasher
+Exec=flashbang-gui
+Icon=io.github.furiousbird55.Flashbang
+Terminal=false
+Categories=Utility;GTK;
+StartupNotify=true
