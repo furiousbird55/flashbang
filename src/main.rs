@@ -1,5 +1,7 @@
 use flashbang::devices::{Disk, DiskChild, FlashDecision, discover_disks};
+use flashbang::format::format_size;
 use flashbang::images::{ImageFile, inspect_image};
+use flashbang::writer::{WritePlan, build_write_plan};
 use std::env;
 use std::path::PathBuf;
 
@@ -128,6 +130,9 @@ fn print_disk(disk: &Disk, image: Option<&ImageFile>) {
                 "  image fits: {}",
                 yes_no(image.fits_in_bytes(disk.size_bytes))
             );
+
+            let plan = build_write_plan(image, disk);
+            print_write_plan(&plan);
         }
     }
 
@@ -146,23 +151,39 @@ fn print_disk(disk: &Disk, image: Option<&ImageFile>) {
         }
     }
 
-    if decision == FlashDecision::NeedsUnmount {
-        println!("  preparation plan:");
-
-        for filesystem in &mounted_filesystems {
-            println!(
-                "    - unmount {} from {}",
-                filesystem.device_path, filesystem.mountpoint
-            );
-        }
-    }
-
     if !disk.children.is_empty() {
         println!("  child devices:");
 
         for child in &disk.children {
             print_child(child, 4);
         }
+    }
+}
+
+fn print_write_plan(plan: &WritePlan) {
+    println!("  write plan:");
+    println!("    image: {}", plan.image_name);
+    println!("    image path: {}", plan.image_path.display());
+    println!("    image size: {}", format_size(plan.image_size_bytes));
+    println!("    target: {}", plan.target_path);
+    println!("    target model: {}", plan.target_model);
+    println!("    target size: {}", format_size(plan.target_size_bytes));
+    println!("    readiness: {}", plan.decision.label());
+
+    if plan.preparation_steps.is_empty() {
+        println!("    preparation: none");
+    } else {
+        println!("    preparation:");
+
+        for step in &plan.preparation_steps {
+            println!("      - {}", step.label());
+        }
+    }
+
+    println!("    final actions:");
+
+    for action in &plan.final_actions {
+        println!("      - {}", action.label());
     }
 }
 
@@ -191,15 +212,4 @@ fn print_child(child: &DiskChild, indent: usize) {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
-}
-
-fn format_size(bytes: u64) -> String {
-    const MIB: f64 = 1024.0 * 1024.0;
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-
-    if bytes as f64 >= GIB {
-        format!("{:.1} GiB", bytes as f64 / GIB)
-    } else {
-        format!("{:.1} MiB", bytes as f64 / MIB)
-    }
 }
