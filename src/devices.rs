@@ -25,23 +25,51 @@ pub struct DiskChild {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiskStatus {
+pub enum FlashDecision {
     ReadyToFlash,
     NeedsUnmount,
+    NoImageSelected,
+    ImageTooLarge,
+    ReadOnly,
     HiddenByDefault,
 }
 
+impl FlashDecision {
+    pub fn label(&self) -> &'static str {
+        match self {
+            FlashDecision::ReadyToFlash => "ready to flash",
+            FlashDecision::NeedsUnmount => "needs unmount first",
+            FlashDecision::NoImageSelected => "no image selected",
+            FlashDecision::ImageTooLarge => "image too large",
+            FlashDecision::ReadOnly => "read-only",
+            FlashDecision::HiddenByDefault => "hidden by default",
+        }
+    }
+}
+
 impl Disk {
-    pub fn status(&self) -> DiskStatus {
-        if !self.removable || self.read_only {
-            return DiskStatus::HiddenByDefault;
+    pub fn flash_decision(&self, image_size_bytes: Option<u64>) -> FlashDecision {
+        if !self.removable {
+            return FlashDecision::HiddenByDefault;
+        }
+
+        if self.read_only {
+            return FlashDecision::ReadOnly;
         }
 
         if self.has_mounts() {
-            DiskStatus::NeedsUnmount
-        } else {
-            DiskStatus::ReadyToFlash
+            return FlashDecision::NeedsUnmount;
         }
+
+        let Some(image_size_bytes) = image_size_bytes else {
+            return FlashDecision::NoImageSelected;
+        };
+
+        if image_size_bytes > self.size_bytes {
+            return FlashDecision::ImageTooLarge;
+        }
+
+        FlashDecision::ReadyToFlash
     }
 
     pub fn size_gib(&self) -> f64 {

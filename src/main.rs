@@ -1,7 +1,13 @@
-use flashbang::devices::{Disk, DiskChild, DiskStatus, discover_disks};
+use flashbang::devices::{Disk, DiskChild, FlashDecision, discover_disks};
 use flashbang::images::{ImageFile, inspect_image};
 use std::env;
 use std::path::PathBuf;
+
+enum ReportSection {
+    Ready,
+    NeedsAttention,
+    Hidden,
+}
 
 fn main() {
     println!("Flashbang device discovery");
@@ -58,55 +64,53 @@ fn print_disk_report(disks: &[Disk], image: Option<&ImageFile>) {
         return;
     }
 
-    println!("Ready to flash:");
+    print_section("Ready to flash:", disks, image, ReportSection::Ready);
+    println!();
 
-    let ready: Vec<&Disk> = disks
-        .iter()
-        .filter(|disk| disk.status() == DiskStatus::ReadyToFlash)
-        .collect();
+    print_section(
+        "Needs attention:",
+        disks,
+        image,
+        ReportSection::NeedsAttention,
+    );
+    println!();
 
-    if ready.is_empty() {
-        println!("  none");
-    } else {
-        for disk in ready {
+    print_section("Hidden by default:", disks, image, ReportSection::Hidden);
+}
+
+fn print_section(title: &str, disks: &[Disk], image: Option<&ImageFile>, section: ReportSection) {
+    println!("{title}");
+
+    let image_size = image.map(|image| image.size_bytes);
+    let mut found_any = false;
+
+    for disk in disks {
+        let decision = disk.flash_decision(image_size);
+
+        let belongs_here = match section {
+            ReportSection::Ready => decision == FlashDecision::ReadyToFlash,
+            ReportSection::NeedsAttention => {
+                decision != FlashDecision::ReadyToFlash
+                    && decision != FlashDecision::HiddenByDefault
+            }
+            ReportSection::Hidden => decision == FlashDecision::HiddenByDefault,
+        };
+
+        if belongs_here {
             print_disk(disk, image);
+            found_any = true;
         }
     }
 
-    println!();
-    println!("Needs unmount first:");
-
-    let needs_unmount: Vec<&Disk> = disks
-        .iter()
-        .filter(|disk| disk.status() == DiskStatus::NeedsUnmount)
-        .collect();
-
-    if needs_unmount.is_empty() {
+    if !found_any {
         println!("  none");
-    } else {
-        for disk in needs_unmount {
-            print_disk(disk, image);
-        }
-    }
-
-    println!();
-    println!("Hidden by default:");
-
-    let hidden: Vec<&Disk> = disks
-        .iter()
-        .filter(|disk| disk.status() == DiskStatus::HiddenByDefault)
-        .collect();
-
-    if hidden.is_empty() {
-        println!("  none");
-    } else {
-        for disk in hidden {
-            print_disk(disk, image);
-        }
     }
 }
 
 fn print_disk(disk: &Disk, image: Option<&ImageFile>) {
+    let image_size = image.map(|image| image.size_bytes);
+    let decision = disk.flash_decision(image_size);
+
     println!();
     println!("- {}", disk.path);
     println!("  name: {}", disk.name);
@@ -115,12 +119,15 @@ fn print_disk(disk: &Disk, image: Option<&ImageFile>) {
     println!("  transport: {}", disk.transport_label());
     println!("  removable: {}", yes_no(disk.removable));
     println!("  read-only: {}", yes_no(disk.read_only));
+    println!("  safety decision: {}", decision.label());
 
     if let Some(image) = image {
-        println!(
-            "  image fits: {}",
-            yes_no(image.fits_in_bytes(disk.size_bytes))
-        );
+        if decision != FlashDecision::HiddenByDefault {
+            println!(
+                "  image fits: {}",
+                yes_no(image.fits_in_bytes(disk.size_bytes))
+            );
+        }
     }
 
     if disk.has_mounts() {
