@@ -120,6 +120,7 @@ fn print_disk(disk: &Disk, image: Option<&ImageFile>) {
     println!("  removable: {}", yes_no(disk.removable));
     println!("  read-only: {}", yes_no(disk.read_only));
     println!("  safety decision: {}", decision.label());
+    println!("  suggested action: {}", decision.suggested_action());
 
     if let Some(image) = image {
         if decision != FlashDecision::HiddenByDefault {
@@ -130,14 +131,30 @@ fn print_disk(disk: &Disk, image: Option<&ImageFile>) {
         }
     }
 
-    if disk.has_mounts() {
+    let mounted_filesystems = disk.mounted_filesystems();
+
+    if mounted_filesystems.is_empty() {
+        println!("  contains mounted filesystems: no");
+    } else {
         println!("  contains mounted filesystems: yes");
 
-        for mountpoint in disk.all_mountpoints() {
-            println!("    - {mountpoint}");
+        for filesystem in &mounted_filesystems {
+            println!(
+                "    - {} at {}",
+                filesystem.device_path, filesystem.mountpoint
+            );
         }
-    } else {
-        println!("  contains mounted filesystems: no");
+    }
+
+    if decision == FlashDecision::NeedsUnmount {
+        println!("  preparation plan:");
+
+        for filesystem in &mounted_filesystems {
+            println!(
+                "    - unmount {} from {}",
+                filesystem.device_path, filesystem.mountpoint
+            );
+        }
     }
 
     if !disk.children.is_empty() {

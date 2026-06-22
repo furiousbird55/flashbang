@@ -24,6 +24,12 @@ pub struct DiskChild {
     pub children: Vec<DiskChild>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MountedFilesystem {
+    pub device_path: String,
+    pub mountpoint: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlashDecision {
     ReadyToFlash,
@@ -45,6 +51,17 @@ impl FlashDecision {
             FlashDecision::HiddenByDefault => "hidden by default",
         }
     }
+
+    pub fn suggested_action(&self) -> &'static str {
+        match self {
+            FlashDecision::ReadyToFlash => "Flash",
+            FlashDecision::NeedsUnmount => "Prepare & Flash",
+            FlashDecision::NoImageSelected => "Choose image",
+            FlashDecision::ImageTooLarge => "Choose smaller image",
+            FlashDecision::ReadOnly => "Cannot flash",
+            FlashDecision::HiddenByDefault => "Hidden",
+        }
+    }
 }
 
 impl Disk {
@@ -57,16 +74,16 @@ impl Disk {
             return FlashDecision::ReadOnly;
         }
 
-        if self.has_mounts() {
-            return FlashDecision::NeedsUnmount;
-        }
-
         let Some(image_size_bytes) = image_size_bytes else {
             return FlashDecision::NoImageSelected;
         };
 
         if image_size_bytes > self.size_bytes {
             return FlashDecision::ImageTooLarge;
+        }
+
+        if self.has_mounts() {
+            return FlashDecision::NeedsUnmount;
         }
 
         FlashDecision::ReadyToFlash
@@ -85,21 +102,24 @@ impl Disk {
     }
 
     pub fn has_mounts(&self) -> bool {
-        !self.all_mountpoints().is_empty()
+        !self.mounted_filesystems().is_empty()
     }
 
-    pub fn all_mountpoints(&self) -> Vec<&str> {
-        let mut mountpoints = Vec::new();
+    pub fn mounted_filesystems(&self) -> Vec<MountedFilesystem> {
+        let mut mounted = Vec::new();
 
         for mountpoint in &self.mountpoints {
-            mountpoints.push(mountpoint.as_str());
+            mounted.push(MountedFilesystem {
+                device_path: self.path.clone(),
+                mountpoint: mountpoint.clone(),
+            });
         }
 
         for child in &self.children {
-            child.collect_mountpoints(&mut mountpoints);
+            child.collect_mounted_filesystems(&mut mounted);
         }
 
-        mountpoints
+        mounted
     }
 }
 
@@ -108,13 +128,16 @@ impl DiskChild {
         self.size_bytes as f64 / 1024.0 / 1024.0 / 1024.0
     }
 
-    fn collect_mountpoints<'a>(&'a self, mountpoints: &mut Vec<&'a str>) {
+    fn collect_mounted_filesystems(&self, mounted: &mut Vec<MountedFilesystem>) {
         for mountpoint in &self.mountpoints {
-            mountpoints.push(mountpoint.as_str());
+            mounted.push(MountedFilesystem {
+                device_path: self.path.clone(),
+                mountpoint: mountpoint.clone(),
+            });
         }
 
         for child in &self.children {
-            child.collect_mountpoints(mountpoints);
+            child.collect_mounted_filesystems(mounted);
         }
     }
 }
