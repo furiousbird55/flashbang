@@ -341,10 +341,14 @@ fn stream_image_to_file_handle(
 
         bytes_written += bytes_read as u64;
 
-        on_progress(WriteProgress {
-            bytes_written,
-            total_bytes: image.size_bytes,
-        });
+        // Do not report 100% yet. The flash is not truly finished until
+        // the output has been flushed and synced below.
+        if bytes_written < image.size_bytes {
+            on_progress(WriteProgress {
+                bytes_written,
+                total_bytes: image.size_bytes,
+            });
+        }
     }
 
     writer
@@ -355,6 +359,12 @@ fn stream_image_to_file_handle(
         .get_ref()
         .sync_all()
         .map_err(|error| format!("failed to sync target: {error}"))?;
+
+    // Now it is fair to report 100%.
+    on_progress(WriteProgress {
+        bytes_written,
+        total_bytes: image.size_bytes,
+    });
 
     Ok(())
 }
